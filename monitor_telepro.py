@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import smtplib
@@ -15,6 +16,7 @@ from playwright.sync_api import sync_playwright
 # --- URLS & CREDENTIALS FROM GITHUB SECRETS ---
 LOGIN_URL = "https://tpro.telsys.in/"
 DASHBOARD_URL = "https://tpro.telsys.in/dashboard#"
+SESSION_FILE = "session_cookie.txt"
 
 USERNAME = os.environ.get("TELEPRO_USER", "").strip()
 PASSWORD = os.environ.get("TELEPRO_PASS", "").strip()
@@ -59,7 +61,6 @@ def send_html_alert(subject, html_body, plain_text_fallback):
     msg["From"] = f"ETP Monitor <{SENDER_EMAIL}>"
     msg["To"] = [email.strip() for email in RECEIVER_EMAIL.split(",") if email.strip()]
 
-    # Set plain text version first (fallback), then attach the HTML version
     msg.set_content(plain_text_fallback)
     msg.add_alternative(html_body, subtype='html')
 
@@ -73,23 +74,66 @@ def send_html_alert(subject, html_body, plain_text_fallback):
         print(f"Failed to send email alert: {e}")
 
 
-def solve_captcha_and_login(page):
-    ocr = ddddocr.DdddOcr(show_ad=False)
+def save_session_cookie(context):
+    for c in context.cookies():
+        if c.get("name") == "sessionid" and c.get("value"):
+            with open(SESSION_FILE, "w") as f:
+                f.write(c["value"].strip())
+            print("Saved live sessionid to cache for future runs (Captcha bypassed next time).")
+            return
 
-    for attempt in range(1, 6):
-        print(f"\n--- Captcha Login Attempt {attempt}/5 ---")
+
+def read_captcha_best(img_bytes, ocr_beta, ocr_std):
+    # Upscale 2x and convert to grayscale for cleaner OCR
+    img = PIL.Image.open(io.BytesIO(img_bytes)).convert("L")
+    img = img.resize((img.width * 2, img.height * 2), PIL.Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    upscaled_bytes = buf.getvalue()
+
+    candidates = []
+    for engine, data in [(ocr_beta, upscaled_bytes), (ocr_beta, img_bytes), (ocr_std, img_bytes)]:
+        try:
+            raw = engine.classification(data).strip().upper()
+            cleaned = re.sub(r"[^A-Z]", "", raw)
+            if cleaned:
+                candidates.append(cleaned)
+        except Exception:
+            pass
+
+    # Prefer a 6-letter read (standard TelePro Captcha format)
+    for c in candidates:
+        if len(c) == 6:
+            return c
+    return candidates[0] if candidates else ""
+
+
+def solve_captcha_and_login(context, page):
+    ocr_std = ddddocr.DdddOcr(show_ad=False)
+    try:
+        ocr_beta = ddddocr.DdddOcr(beta=True, show_ad=False)
+    except Exception:
+        ocr_beta = ocr_std
+
+    context.clear_cookies()
+
+    for attempt in range(1, 13):
+        print(f"\n--- Captcha Login Attempt {attempt}/12 ---")
         try:
             page.goto(LOGIN_URL, timeout=30000)
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(2000)
 
             page.locator("input[type='text']:visible, input[type='email']:visible").first.fill(USERNAME)
             page.locator("input[type='password']:visible").first.fill(PASSWORD)
 
             captcha_el = page.locator("img.captcha, img[src*='captcha' i], form img").first
             img_bytes = captcha_el.screenshot(timeout=5000)
-            raw_text = ocr.classification(img_bytes).strip().upper()
-            captcha_text = re.sub(r"[^A-Z0-9]", "", raw_text)
+            captcha_text = read_captcha_best(img_bytes, ocr_beta, ocr_std)
             print(f"OCR read Captcha as: '{captcha_text}'")
+
+            if len(captcha_text) < 5:
+                print("Incomplete OCR read, reloading fresh Captcha...")
+                continue
 
             captcha_input = page.locator(
                 "input[name='captcha_1'], input[placeholder*='captcha' i]:visible, input[type='text']:visible"
@@ -97,44 +141,74 @@ def solve_captcha_and_login(page):
             captcha_input.fill(captcha_text, timeout=5000)
 
             page.locator("button:has-text('Login'), input[value*='Login' i], button[type='submit']").first.click()
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(3500)
 
             body_now = page.locator("body").inner_text()
             if "dashboard" in page.url.lower() or "IoT:" in body_now or "OD23KL" in body_now:
                 print("Successfully logged in via Captcha solver!")
+                save_session_cookie(context)
                 return True
-            print(f"Captcha rejected or still on login page ({page.url}), retrying...")
+            print(f"Captcha rejected ({page.url}), retrying...")
         except Exception as e:
             print(f"Attempt {attempt} error: {e}")
 
     return False
 
 
+def try_cookie(context, page, raw_cookie, source_label):
+    match_32 = re.search(r"\b([a-z0-9]{32})\b", raw_cookie)
+    cookie_val = match_32.group(1) if match_32 else re.sub(r"[^a-zA-Z0-9]", "", raw_cookie.split("=")[-1])[:32]
+    if not cookie_val:
+        return False
+
+    context.clear_cookies()
+    context.add_cookies([{
+        "name": "sessionid",
+        "value": cookie_val,
+        "url": "https://tpro.telsys.in"
+    }])
+    print(f"Trying sessionid from {source_label} (length {len(cookie_val)})...")
+    page.goto(DASHBOARD_URL, timeout=30000)
+    page.wait_for_timeout(4000)
+
+    body_preview = page.locator("body").inner_text()
+    if "IoT:" in body_preview or "OD23KL" in body_preview:
+        print(f"Successfully logged in via {source_label}!")
+        save_session_cookie(context)
+        return True
+
+    print(f"Cookie from {source_label} expired or logged out.")
+    return False
+
+
 def authenticate(context, page):
+    # 1. Try auto-saved cached session cookie first
+    if os.path.exists(SESSION_FILE):
+        try:
+            with open(SESSION_FILE, "r") as f:
+                cached_cookie = f.read().strip()
+            if cached_cookie and try_cookie(context, page, cached_cookie, "auto-cache"):
+                return True
+        except Exception as e:
+            print(f"Cached cookie check failed: {e}")
+
+    # 2. Try GitHub Secret TELEPRO_COOKIE next
     if SESSION_COOKIE:
         try:
-            match_32 = re.search(r"\b([a-z0-9]{32})\b", SESSION_COOKIE)
-            cookie_val = match_32.group(1) if match_32 else re.sub(r"[^a-zA-Z0-9]", "", SESSION_COOKIE.split("=")[-1])[:32]
-
-            if cookie_val:
-                context.add_cookies([{
-                    "name": "sessionid",
-                    "value": cookie_val,
-                    "url": "https://tpro.telsys.in"
-                }])
-                print(f"Injected sessionid cookie (length {len(cookie_val)}), opening dashboard...")
-                page.goto(DASHBOARD_URL, timeout=30000)
-                page.wait_for_timeout(5000)
-
-                body_preview = page.locator("body").inner_text()
-                if "IoT:" in body_preview or "OD23KL" in body_preview:
-                    print("Successfully logged in via sessionid cookie!")
-                    return True
-                print("Session cookie expired or logged out. Falling back to Captcha login...")
+            if try_cookie(context, page, SESSION_COOKIE, "GitHub Secret"):
+                return True
         except Exception as e:
-            print(f"Cookie injection skipped ({e}). Falling back to Captcha login...")
+            print(f"Secret cookie check failed: {e}")
 
-    return solve_captcha_and_login(page)
+    # 3. Fallback to upgraded Captcha solver (auto-saves new cookie on success)
+    print("Falling back to upgraded Captcha login...")
+    if solve_captcha_and_login(context, page):
+        return True
+
+    # Remove stale file if login failed so we don't re-cache a dead cookie
+    if os.path.exists(SESSION_FILE):
+        os.remove(SESSION_FILE)
+    return False
 
 
 def check_dashboard():
@@ -152,7 +226,7 @@ def check_dashboard():
             print("Login failed. Exiting without sending an alert email.")
             return
 
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(4000)
         body_text = page.locator("body").inner_text()
         print("\n--- Dashboard Loaded Successfully ---")
 
@@ -176,9 +250,11 @@ def check_dashboard():
         # 3. Check CPCB/KSPCB Transmission
         cpcb_ok = page.locator("text=CPCB: >> .. >> .fa-check, .fa-check-circle, .text-success, svg, img, i").count() > 0
         kspcb_ok = page.locator("text=KSPCB: >> .. >> .fa-check, .fa-check-circle, .text-success, svg, img, i").count() > 0
-        
-        if not cpcb_ok: system_alerts.append("Data NOT sending to <b>CPCB</b> (Checkmark missing)")
-        if not kspcb_ok: system_alerts.append("Data NOT sending to <b>KSPCB</b> (Checkmark missing)")
+
+        if not cpcb_ok:
+            system_alerts.append("Data NOT sending to <b>CPCB</b> (Checkmark missing)")
+        if not kspcb_ok:
+            system_alerts.append("Data NOT sending to <b>KSPCB</b> (Checkmark missing)")
 
         # 4. Check Data Freshness
         ts_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
@@ -216,20 +292,19 @@ def check_dashboard():
             <h2 style="color: #d9534f; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;">⚠️ URGENT: ETP Alert</h2>
             <p>The automated monitoring system has detected issues at <b>Site OD23KL03233_Effluent_HLLONLINE</b>.</p>
     """
-    
-    # Inject Limit Alerts into HTML
+
     if limit_alerts:
         html_content += "<h3 style='color: #d9534f; margin-bottom: 5px;'>📊 Parameter Limit Violations:</h3><ul style='margin-top: 5px; background: #fff3f3; padding: 15px 30px; border-radius: 5px;'>"
-        for a in limit_alerts: html_content += f"<li style='margin-bottom: 5px;'>{a}</li>"
+        for a in limit_alerts:
+            html_content += f"<li style='margin-bottom: 5px;'>{a}</li>"
         html_content += "</ul>"
 
-    # Inject System/Delay Alerts into HTML
     if system_alerts:
         html_content += "<h3 style='color: #f0ad4e; margin-bottom: 5px;'>📡 Transmission & System Issues:</h3><ul style='margin-top: 5px; background: #fff8eb; padding: 15px 30px; border-radius: 5px;'>"
-        for a in system_alerts: html_content += f"<li style='margin-bottom: 5px;'>{a}</li>"
+        for a in system_alerts:
+            html_content += f"<li style='margin-bottom: 5px;'>{a}</li>"
         html_content += "</ul>"
 
-    # Footer and Button
     html_content += f"""
             <hr style="border: 0; border-top: 1px solid #eee; margin: 25px 0;">
             <p style="font-size: 13px; color: #777; margin-bottom: 20px;">
@@ -240,13 +315,11 @@ def check_dashboard():
       </body>
     </html>
     """
-    
-    # Plain text fallback
+
     plain_text = "ETP Alerts Detected:\n\n"
     for a in limit_alerts + system_alerts:
         plain_text += f"- {re.sub('<[^<]+>', '', a)}\n"
-    
-    # Dispatch Email
+
     send_html_alert(final_subject, html_content, plain_text)
 
 
