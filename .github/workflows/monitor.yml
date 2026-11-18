@@ -1,4 +1,4 @@
-name: TelePro 5-Min ETP Monitor
+name: TelePro 15-Min ETP Monitor
 
 on:
   schedule:
@@ -8,7 +8,6 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
 
     steps:
       - name: Checkout repository
@@ -24,16 +23,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-chromium
+          key: playwright-browsers-${{ runner.os }}
 
       - name: Install Dependencies
         run: |
-          pip install playwright ddddocr "Pillow==9.5.0"
-          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" != "true" ]; then
-            playwright install --with-deps chromium
-          else
-            playwright install-deps chromium
-          fi
+          pip install --upgrade pip
+          pip install playwright ddddocr "Pillow<10"
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Cache TelePro Session Cookie
+        uses: actions/cache@v4
+        with:
+          path: session_cookie.txt
+          key: telepro-session-${{ github.run_id }}
+          restore-keys: |
+            telepro-session-
 
       - name: Run TelePro Monitor
         env:
