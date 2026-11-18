@@ -2,7 +2,7 @@ name: TelePro 5-Min ETP Monitor
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 
 jobs:
