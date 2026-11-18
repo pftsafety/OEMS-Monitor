@@ -30,8 +30,8 @@ RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "").strip()
 LIMITS = {
     "BOD": {"max": 30.0},
     "COD": {"max": 250.0},
-    "pH":  {"min": 6.5, "max": 7.0},
-    "TSS": {"max": 100.0}
+    "pH":  {"min": 6.5, "max": 8.5},
+    "TSS": {"max": 200.0}
 }
 
 MAX_DATA_DELAY_MINUTES = 25
