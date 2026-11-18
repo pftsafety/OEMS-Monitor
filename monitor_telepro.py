@@ -34,7 +34,7 @@ LIMITS = {
     "TSS": {"max": 200.0}
 }
 
-MAX_DATA_DELAY_MINUTES = 25
+MAX_DATA_DELAY_MINUTES = 18
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -147,12 +147,13 @@ def check_dashboard():
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
 
-      if not authenticate(context, page):
+        if not authenticate(context, page):
             browser.close()
             print("Login failed. Exiting without sending an alert email.")
-            return page.wait_for_timeout(5000)
-        
-body_text = page.locator("body").inner_text()
+            return
+
+        page.wait_for_timeout(5000)
+        body_text = page.locator("body").inner_text()
         print("\n--- Dashboard Loaded Successfully ---")
 
         # 1. Check Limits (BOD, COD, pH, TSS)
@@ -247,6 +248,7 @@ body_text = page.locator("body").inner_text()
     
     # Dispatch Email
     send_html_alert(final_subject, html_content, plain_text)
+
 
 if __name__ == "__main__":
     try:
