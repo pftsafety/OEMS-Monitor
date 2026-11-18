@@ -150,8 +150,7 @@ def check_dashboard():
       if not authenticate(context, page):
             browser.close()
             print("Login failed. Exiting without sending an alert email.")
-            return
-page.wait_for_timeout(5000)
+            return page.wait_for_timeout(5000)
         
 body_text = page.locator("body").inner_text()
         print("\n--- Dashboard Loaded Successfully ---")
