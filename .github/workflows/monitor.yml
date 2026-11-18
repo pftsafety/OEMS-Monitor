@@ -1,0 +1,36 @@
+name: TelePro 5-Min ETP Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Runs automatically every 5 minutes
+  workflow_dispatch:       # Allows manual test runs from the Actions tab
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Playwright and OCR Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install playwright ddddocr
+          playwright install --with-deps chromium
+
+      - name: Run TelePro Monitor
+        env:
+          TELEPRO_USER: ${{ secrets.TELEPRO_USER }}
+          TELEPRO_PASS: ${{ secrets.TELEPRO_PASS }}
+          TELEPRO_COOKIE: ${{ secrets.TELEPRO_COOKIE }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          ALERT_EMAIL_PASS: ${{ secrets.ALERT_EMAIL_PASS }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+        run: python monitor_telepro.py
