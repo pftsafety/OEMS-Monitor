@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import PIL.Image
 
-# Fix Pillow 10+ compatibility for ddddocr just in case
+# Ensure Pillow compatibility for ddddocr
 if not hasattr(PIL.Image, "ANTIALIAS"):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 
@@ -27,6 +27,7 @@ SENDER_EMAIL = os.environ.get("ALERT_EMAIL", "").strip()
 SENDER_APP_PASSWORD = os.environ.get("ALERT_EMAIL_PASS", "").strip()
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "").strip()
 
+# --- EFFLUENT THRESHOLD LIMITS ---
 LIMITS = {
     "BOD": {"max": 30.0},
     "COD": {"max": 250.0},
@@ -40,7 +41,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 def send_alert(subject, body):
     if not SENDER_EMAIL or not SENDER_APP_PASSWORD or not RECEIVER_EMAIL:
-        print("WARNING: Email secrets (ALERT_EMAIL / ALERT_EMAIL_PASS / RECEIVER_EMAIL) are missing or empty!")
+        print("WARNING: Email secrets are missing or empty!")
         return
 
     msg = EmailMessage()
@@ -68,27 +69,18 @@ def solve_captcha_and_login(page):
             page.goto(LOGIN_URL, timeout=30000)
             page.wait_for_timeout(3000)
 
-            # Fill Email & Password
             page.locator("input[type='text'], input[type='email']").first.fill(USERNAME)
             page.locator("input[type='password']").first.fill(PASSWORD)
 
-            # Find Captcha image reliably
             captcha_el = None
-            for selector in [
-                "img[src*='captcha' i]",
-                "img.captcha",
-                "form img",
-                "canvas"
-            ]:
+            for selector in ["img[src*='captcha' i]", "img.captcha", "form img", "canvas"]:
                 loc = page.locator(selector).first
                 if loc.count() > 0 and loc.is_visible():
                     captcha_el = loc
                     break
 
             if not captcha_el:
-                # Fallback: pick any visible image inside the login box that isn't the logo
-                imgs = page.locator("img").all()
-                for img in imgs:
+                for img in page.locator("img").all():
                     box = img.bounding_box()
                     if box and box["width"] > 60 and box["height"] < 120:
                         captcha_el = img
@@ -99,46 +91,51 @@ def solve_captcha_and_login(page):
             captcha_text = re.sub(r"[^A-Z0-9]", "", raw_text)
             print(f"OCR read Captcha as: '{captcha_text}'")
 
-            # Fill Captcha input box
             captcha_input = page.locator("input[placeholder*='captcha' i], input[name*='captcha' i]").first
             if captcha_input.count() == 0:
                 captcha_input = page.locator("input[type='text']").nth(1)
             captcha_input.fill(captcha_text)
 
-            # Click Login button
             page.locator("button:has-text('Login'), input[value*='Login' i], button[type='submit']").first.click()
             page.wait_for_timeout(5000)
 
             if "dashboard" in page.url.lower() or "IoT:" in page.locator("body").inner_text():
                 print("Successfully logged in via Captcha solver!")
                 return True
-            else:
-                print(f"Still on {page.url}, retrying...")
+            print(f"Still on {page.url}, retrying...")
         except Exception as e:
-            print(f"Attempt {attempt} encountered an error: {e}")
+            print(f"Attempt {attempt} error: {e}")
 
     return False
 
 
 def authenticate(context, page):
+    # 1. Primary Method: Inject sessionid cookie using valid URL field
     if SESSION_COOKIE:
-        cookie_val = SESSION_COOKIE.split("=", 1)[-1].strip()
-        context.add_cookies([{
-            "name": "sessionid",
-            "value": cookie_val,
-            "domain": "tpro.telsys.in",
-            "path": "/"
-        }])
-        print("Trying sessionid cookie...")
-        page.goto(DASHBOARD_URL, timeout=30000)
-        page.wait_for_timeout(5000)
+        try:
+            # Extract purely alphanumeric sessionid value
+            raw_val = SESSION_COOKIE.split("=", 1)[-1]
+            cookie_val = re.sub(r"[^a-zA-Z0-9]", "", raw_val)
 
-        body_preview = page.locator("body").inner_text()
-        if "IoT:" in body_preview or "BOD" in body_preview:
-            print("Logged in directly via sessionid cookie!")
-            return True
-        print("Session cookie did not open dashboard. Falling back to Captcha login...")
+            if cookie_val:
+                context.add_cookies([{
+                    "name": "sessionid",
+                    "value": cookie_val,
+                    "url": "https://tpro.telsys.in"
+                }])
+                print(f"Injected sessionid cookie (length {len(cookie_val)}), opening dashboard...")
+                page.goto(DASHBOARD_URL, timeout=30000)
+                page.wait_for_timeout(5000)
 
+                body_preview = page.locator("body").inner_text()
+                if "IoT:" in body_preview or "BOD" in body_preview:
+                    print("Successfully logged in via sessionid cookie!")
+                    return True
+                print("Session cookie expired or logged out. Falling back to Captcha login...")
+        except Exception as e:
+            print(f"Cookie injection skipped ({e}). Falling back to Captcha login...")
+
+    # 2. Fallback Method: Solve Captcha automatically
     return solve_captcha_and_login(page)
 
 
@@ -154,7 +151,7 @@ def check_dashboard():
             browser.close()
             send_alert(
                 "Login Failed",
-                "Automated monitor could not log into TelePro. Please log into TelePro on Chrome, copy the new 'sessionid' cookie from F12 -> Application -> Cookies, and update TELEPRO_COOKIE in GitHub Secrets."
+                "Automated monitor could not log into TelePro. Please refresh TELEPRO_COOKIE in GitHub Secrets."
             )
             return
 
