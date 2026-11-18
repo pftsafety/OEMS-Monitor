@@ -19,10 +19,10 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Playwright and OCR Dependencies
+- name: Install Playwright and OCR Dependencies
         run: |
           pip install --upgrade pip
-          pip install playwright ddddocr
+          pip install playwright ddddocr "Pillow==9.5.0"
           playwright install --with-deps chromium
 
       - name: Run TelePro Monitor
