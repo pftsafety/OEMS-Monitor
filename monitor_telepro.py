@@ -147,13 +147,9 @@ def check_dashboard():
         context = browser.new_context(viewport={"width": 1920, "height": 1080})
         page = context.new_page()
 
-        if not authenticate(context, page):
+      if not authenticate(context, page):
             browser.close()
-            send_html_alert(
-                "System Login Failed",
-                "<h3 style='color:red;'>Login Failure</h3><p>The automated monitor could not log into TelePro after 5 Captcha attempts.</p>",
-                "Login Failed: Could not log in."
-            )
+            print("Login failed. Exiting without sending an alert email.")
             return
 
         page.wait_for_timeout(5000)
