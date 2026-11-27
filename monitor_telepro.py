@@ -21,6 +21,7 @@ from playwright.sync_api import sync_playwright
 LOGIN_URL = "https://tpro.telsys.in/"
 DASHBOARD_URL = "https://tpro.telsys.in/dashboard#"
 SESSION_FILE = "session_cookie.txt"
+STATE_FILE = "system_state.json"
 
 USERNAME = os.environ.get("TELEPRO_USER", "").strip()
 PASSWORD = os.environ.get("TELEPRO_PASS", "").strip()
@@ -64,13 +65,35 @@ def strip_html(text):
     return re.sub(r"<[^<]+?>", "", text)
 
 
-def send_html_alert(subject, html_body, plain_text_fallback):
+def load_system_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                return {
+                    "offline": bool(data.get("offline", False)),
+                    "offline_since": data.get("offline_since")
+                }
+        except Exception as e:
+            print(f"Could not read state file: {e}")
+    return {"offline": False, "offline_since": None}
+
+
+def save_system_state(is_offline, offline_since=None):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({"offline": is_offline, "offline_since": offline_since}, f)
+    except Exception as e:
+        print(f"Could not save state file: {e}")
+
+
+def send_html_alert(subject, html_body, plain_text_fallback, prefix="[URGENT]"):
     if not SENDER_EMAIL or not SENDER_APP_PASSWORD or not RECEIVER_EMAIL:
         print("WARNING: Cannot send email because ALERT_EMAIL, ALERT_EMAIL_PASS, or RECEIVER_EMAIL secret is empty!")
         return
 
     msg = EmailMessage()
-    msg["Subject"] = f"[URGENT] HLL TelePro: {subject}"
+    msg["Subject"] = f"{prefix} HLL TelePro: {subject}"
     msg["From"] = f"ETP Monitor <{SENDER_EMAIL}>"
     msg["To"] = [email.strip() for email in RECEIVER_EMAIL.split(",") if email.strip()]
 
@@ -82,18 +105,44 @@ def send_html_alert(subject, html_body, plain_text_fallback):
             server.starttls()
             server.login(SENDER_EMAIL, SENDER_APP_PASSWORD.replace(" ", ""))
             server.send_message(msg)
-        print(f"HTML Alert email sent successfully: {subject}")
+        print(f"HTML Alert email sent successfully: {prefix} {subject}")
     except Exception as e:
         print(f"Failed to send email alert: {e}")
 
 
-def send_telegram_alert(subject, limit_alerts, system_alerts, checked_at):
+def post_telegram_message(message_text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram secrets not set. Skipping Telegram alert.")
         return
 
     chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
+    for idx, chat_id in enumerate(chat_ids, start=1):
+        payload = json.dumps({
+            "chat_id": chat_id,
+            "text": message_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                print(f"Telegram message #{idx} sent successfully (HTTP {resp.status}).")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            print(f"Failed to send Telegram message #{idx} (HTTP {e.code}): {err_body}")
+        except Exception as e:
+            print(f"Failed to send Telegram message #{idx}: {e}")
+
+
+def send_telegram_alert(subject, limit_alerts, system_alerts, checked_at):
     lines = [
         "⚠️ <b>HLL TelePro ETP Alert</b>",
         f"<b>{html.escape(subject)}</b>",
@@ -115,32 +164,57 @@ def send_telegram_alert(subject, limit_alerts, system_alerts, checked_at):
 
     lines.append(f"🕒 {html.escape(checked_at)}")
     lines.append(f'🔗 <a href="{DASHBOARD_URL}">View Live TelePro Dashboard</a>')
+    post_telegram_message("\n".join(lines))
 
-    message_text = "\n".join(lines)
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    for idx, chat_id in enumerate(chat_ids, start=1):
-        payload = json.dumps({
-            "chat_id": chat_id,
-            "text": message_text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }).encode("utf-8")
+def send_online_recovery_alert(was_offline_since, latest_ts, checked_at):
+    offline_line = (
+        f"<li>Was offline since: <b>{was_offline_since}</b></li>"
+        if was_offline_since else ""
+    )
 
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                print(f"Telegram alert #{idx} sent successfully (HTTP {resp.status}).")
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="ignore")
-            print(f"Failed to send Telegram alert #{idx} (HTTP {e.code}): {err_body}")
-        except Exception as e:
-            print(f"Failed to send Telegram alert #{idx}: {e}")
+    html_content = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-top: 5px solid #28a745; border-radius: 5px;">
+        <div style="padding: 20px;">
+            <h2 style="color: #28a745; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;">✅ RESOLVED: System Back Online</h2>
+            <p>The automated monitoring system at <b>Site OD23KL03233_Effluent_HLLONLINE</b> is back <b>ONLINE</b> and transmitting fresh data.</p>
+            <ul style="margin-top: 10px; background: #eefaf0; padding: 15px 30px; border-radius: 5px;">
+                {offline_line}
+                <li>System is online as of: <b>{latest_ts}</b></li>
+            </ul>
+            <hr style="border: 0; border-top: 1px solid #eee; margin: 25px 0;">
+            <p style="font-size: 13px; color: #777; margin-bottom: 20px;">
+                <b>Checked at:</b> {checked_at}
+            </p>
+            <a href="{DASHBOARD_URL}" style="display: inline-block; background-color: #28a745; color: white; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">View Live TelePro Dashboard</a>
+        </div>
+      </body>
+    </html>
+    """
+
+    plain_text = (
+        f"System Back Online - Site OD23KL03233_Effluent_HLLONLINE\n"
+        f"{f'Was offline since: {was_offline_since}\n' if was_offline_since else ''}"
+        f"System is online as of: {latest_ts}\n"
+        f"Checked at: {checked_at}\n"
+    )
+
+    send_html_alert("System Back Online", html_content, plain_text, prefix="[RESOLVED]")
+
+    tg_lines = [
+        "✅ <b>HLL TelePro ETP: System Back Online</b>",
+        "Site: <code>OD23KL03233_Effluent_HLLONLINE</code>",
+        "",
+        "🟢 System is back <b>ONLINE</b> and transmitting fresh data."
+    ]
+    if was_offline_since:
+        tg_lines.append(f"• Was offline since: <b>{html.escape(was_offline_since)}</b>")
+    tg_lines.append(f"• Online as of: <b>{html.escape(latest_ts)}</b>")
+    tg_lines.append("")
+    tg_lines.append(f"🕒 {html.escape(checked_at)}")
+    tg_lines.append(f'🔗 <a href="{DASHBOARD_URL}">View Live TelePro Dashboard</a>')
+    post_telegram_message("\n".join(tg_lines))
 
 
 def check_board_status(page, label):
@@ -356,6 +430,7 @@ def authenticate(context, page):
 
 def check_dashboard():
     check_secrets_status()
+    prev_state = load_system_state()
     limit_alerts = []
     system_alerts = []
 
@@ -366,7 +441,7 @@ def check_dashboard():
 
         if not authenticate(context, page):
             browser.close()
-            print("Login failed. Exiting without sending an alert.")
+            print("Login failed. Exiting without changing state or sending an alert.")
             return
 
         page.wait_for_timeout(4000)
@@ -386,11 +461,26 @@ def check_dashboard():
             else:
                 print(f"Warning: Could not parse {param} from text.")
 
-        # 2. Check IoT Status
-        if "IoT: Online" not in body_text:
-            system_alerts.append("IoT Device Status is <b>OFFLINE</b>")
+        # 2. Extract Latest Data Timestamp
+        ts_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
+        latest_ts_formatted = None
+        delay_mins = None
+        if ts_match:
+            timestamp_str = ts_match.group(1)
+            last_update = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
+            latest_ts_formatted = last_update.strftime("%d-%b-%Y %I:%M:%S %p IST")
+            delay_mins = (datetime.now(IST) - last_update).total_seconds() / 60
+            print(f"Latest Timestamp: {latest_ts_formatted} ({delay_mins:.1f} mins old)")
 
-        # 3. Check CPCB/KSPCB Transmission (Exact Line Crop Check)
+        # 3. Check IoT Status
+        iot_offline = "IoT: Online" not in body_text
+        if iot_offline:
+            if latest_ts_formatted:
+                system_alerts.append(f"IoT Device Status is <b>OFFLINE</b> since <b>{latest_ts_formatted}</b>.")
+            else:
+                system_alerts.append("IoT Device Status is <b>OFFLINE</b>.")
+
+        # 4. Check CPCB/KSPCB Transmission (Exact Line Crop Check)
         cpcb_ok, cpcb_info = check_board_status(page, "CPCB:")
         kspcb_ok, kspcb_info = check_board_status(page, "KSPCB:")
         print(f"CPCB Status: {'OK' if cpcb_ok else 'FAILED'} | {cpcb_info}")
@@ -401,24 +491,38 @@ def check_dashboard():
         if not kspcb_ok:
             system_alerts.append("Data NOT sending to <b>KSPCB</b> (Red X / Transmission Failed)")
 
-        # 4. Check Data Freshness
-        ts_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
-        if ts_match:
-            timestamp_str = ts_match.group(1)
-            last_update = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
-            delay_mins = (datetime.now(IST) - last_update).total_seconds() / 60
-            print(f"Latest Timestamp: {timestamp_str} ({delay_mins:.1f} mins old)")
-
+        # 5. Check Data Freshness
+        data_stale = False
+        if latest_ts_formatted is not None:
             if delay_mins > MAX_DATA_DELAY_MINUTES:
+                data_stale = True
                 system_alerts.append(
-                    f"Stale Data: Last update at {timestamp_str} ({int(delay_mins)} mins ago, exceeding {MAX_DATA_DELAY_MINUTES}m limit)."
+                    f"System is offline since <b>{latest_ts_formatted}</b> ({int(delay_mins)} mins ago, exceeding {MAX_DATA_DELAY_MINUTES}m limit)."
                 )
         else:
+            data_stale = True
             system_alerts.append("Could not find a valid data timestamp on the dashboard.")
 
         browser.close()
 
-    # Determine Dynamic Subject Line
+    checked_at = datetime.now(IST).strftime("%d-%b-%Y %I:%M:%S %p IST")
+    is_currently_offline = iot_offline or data_stale
+
+    # 6. Track Offline -> Online Recovery State
+    if is_currently_offline:
+        recorded_since = prev_state.get("offline_since") or latest_ts_formatted or checked_at
+        save_system_state(True, recorded_since)
+    else:
+        if prev_state.get("offline"):
+            print("\nSystem recovered! Sending Back Online alert...")
+            send_online_recovery_alert(
+                prev_state.get("offline_since"),
+                latest_ts_formatted or checked_at,
+                checked_at
+            )
+        save_system_state(False, None)
+
+    # Determine Dynamic Subject Line for Active Alerts
     if limit_alerts and system_alerts:
         final_subject = "Parameter Limits Exceeded & Data Transmission Failure"
     elif limit_alerts:
@@ -428,8 +532,6 @@ def check_dashboard():
     else:
         print("\nAll parameters normal and transmitting on schedule.")
         return
-
-    checked_at = datetime.now(IST).strftime("%Y-%m-%d %I:%M:%S %p IST")
 
     # Build the HTML Email Body
     html_content = f"""
