@@ -1,4 +1,4 @@
-name: TelePro 15-Min ETP Monitor
+name: TelePro & KSPCB ETP Monitor
 
 on:
   schedule:
@@ -26,18 +26,20 @@ jobs:
           key: playwright-browsers-${{ runner.os }}
 
       - name: Install Dependencies
+        id: install
         run: |
           pip install --upgrade pip
           pip install playwright ddddocr "Pillow<10"
           playwright install chromium
           playwright install-deps chromium
 
-      - name: Cache TelePro Session & Alert State
+      - name: Cache TelePro & KSPCB State
         uses: actions/cache@v4
         with:
           path: |
             session_cookie.txt
             system_state.json
+            kspcb_state.json
           key: telepro-state-${{ github.run_id }}
           restore-keys: |
             telepro-state-
@@ -53,3 +55,15 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor_telepro.py
+
+      - name: Run KSPCB EMS Monitor
+        if: always() && steps.install.outcome == 'success'
+        env:
+          KSPCB_USER: ${{ secrets.KSPCB_USER }}
+          KSPCB_PASS: ${{ secrets.KSPCB_PASS }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          ALERT_EMAIL_PASS: ${{ secrets.ALERT_EMAIL_PASS }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor_kspcb.py
