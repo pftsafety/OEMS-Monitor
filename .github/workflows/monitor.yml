@@ -32,13 +32,15 @@ jobs:
           playwright install chromium
           playwright install-deps chromium
 
-      - name: Cache TelePro Session Cookie
+      - name: Cache TelePro Session & Alert State
         uses: actions/cache@v4
         with:
-          path: session_cookie.txt
-          key: telepro-session-${{ github.run_id }}
+          path: |
+            session_cookie.txt
+            system_state.json
+          key: telepro-state-${{ github.run_id }}
           restore-keys: |
-            telepro-session-
+            telepro-state-
 
       - name: Run TelePro Monitor
         env:
