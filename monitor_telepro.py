@@ -44,6 +44,7 @@ LIMITS = {
     "TSS": {"max": 200.0}
 }
 
+# Portal updates every 5 mins -> alert if delayed more than 12 mins (2+ missed pushes)
 MAX_DATA_DELAY_MINUTES = 12
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -177,8 +178,8 @@ def send_online_recovery_alert(was_offline_since, latest_ts, checked_at):
     <html>
       <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-top: 5px solid #28a745; border-radius: 5px;">
         <div style="padding: 20px;">
-            <h2 style="color: #28a745; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;">✅ RESOLVED: System Back Online</h2>
-            <p>The automated monitoring system at <b>Site OD23KL03233_Effluent_HLLONLINE</b> is back <b>ONLINE</b> and transmitting fresh data.</p>
+            <h2 style="color: #28a745; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;">✅ RESOLVED: TelePro System Back Online</h2>
+            <p>The automated monitoring system on <b>TelePro (Site OD23KL03233_Effluent_HLLONLINE)</b> is back <b>ONLINE</b> and transmitting fresh data.</p>
             <ul style="margin-top: 10px; background: #eefaf0; padding: 15px 30px; border-radius: 5px;">
                 {offline_line}
                 <li>System is online as of: <b>{latest_ts}</b></li>
@@ -195,7 +196,7 @@ def send_online_recovery_alert(was_offline_since, latest_ts, checked_at):
 
     offline_plain = f"Was offline since: {was_offline_since}\n" if was_offline_since else ""
     plain_text = (
-        f"System Back Online - Site OD23KL03233_Effluent_HLLONLINE\n"
+        f"TelePro System Back Online - Site OD23KL03233_Effluent_HLLONLINE\n"
         f"{offline_plain}"
         f"System is online as of: {latest_ts}\n"
         f"Checked at: {checked_at}\n"
@@ -492,7 +493,7 @@ def check_dashboard():
         if not kspcb_ok:
             system_alerts.append("Data NOT sending to <b>KSPCB</b> (Red X / Transmission Failed)")
 
-        # 5. Check Data Freshness
+        # 5. Check Data Freshness (5-min update cycle -> 12-min threshold)
         data_stale = False
         if latest_ts_formatted is not None:
             if delay_mins > MAX_DATA_DELAY_MINUTES:
@@ -539,8 +540,8 @@ def check_dashboard():
     <html>
       <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-top: 5px solid #d9534f; border-radius: 5px;">
         <div style="padding: 20px;">
-            <h2 style="color: #d9534f; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;">⚠️ URGENT: ETP Alert</h2>
-            <p>The automated monitoring system has detected issues at <b>Site OD23KL03233_Effluent_HLLONLINE</b>.</p>
+            <h2 style="color: #d9534f; margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;">⚠️ URGENT: TelePro ETP Alert</h2>
+            <p>The automated monitoring system has detected issues on <b>TelePro (Site OD23KL03233_Effluent_HLLONLINE)</b>.</p>
     """
 
     if limit_alerts:
@@ -566,7 +567,7 @@ def check_dashboard():
     </html>
     """
 
-    plain_text = "ETP Alerts Detected:\n\n"
+    plain_text = "TelePro ETP Alerts Detected:\n\n"
     for a in limit_alerts + system_alerts:
         plain_text += f"- {strip_html(a)}\n"
 
