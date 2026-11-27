@@ -193,9 +193,10 @@ def send_online_recovery_alert(was_offline_since, latest_ts, checked_at):
     </html>
     """
 
+    offline_plain = f"Was offline since: {was_offline_since}\n" if was_offline_since else ""
     plain_text = (
         f"System Back Online - Site OD23KL03233_Effluent_HLLONLINE\n"
-        f"{f'Was offline since: {was_offline_since}\n' if was_offline_since else ''}"
+        f"{offline_plain}"
         f"System is online as of: {latest_ts}\n"
         f"Checked at: {checked_at}\n"
     )
