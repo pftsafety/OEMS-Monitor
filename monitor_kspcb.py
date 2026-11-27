@@ -210,6 +210,28 @@ def send_online_recovery_alert(was_offline_since, latest_ts, checked_at):
     post_telegram_message("\n".join(tg_lines))
 
 
+def click_first_visible(page, selector, label_desc="", min_y=0):
+    loc = page.locator(selector)
+    count = loc.count()
+    for i in range(count):
+        el = loc.nth(i)
+        try:
+            if not el.is_visible():
+                continue
+            box = el.bounding_box()
+            if not box or box["width"] < 2 or box["height"] < 2:
+                continue
+            if box["y"] < min_y:
+                continue
+            el.click(timeout=5000)
+            if label_desc:
+                print(f"Clicked visible {label_desc} (match {i + 1}/{count}, y={int(box['y'])}).")
+            return True
+        except Exception:
+            pass
+    return False
+
+
 def login_and_load_facility(page):
     if not KSPCB_USER or not KSPCB_PASS:
         print("KSPCB_USER or KSPCB_PASS secret is missing.")
@@ -235,12 +257,12 @@ def login_and_load_facility(page):
 
         # Wait for the 'Welcome Back' popup to finish disappearing
         try:
-            page.locator("text=Welcome Back").first.wait_for(state="hidden", timeout=10000)
+            page.locator("text=Welcome Back").first.wait_for(state="hidden", timeout=12000)
         except Exception:
             pass
         page.wait_for_timeout(2000)
 
-        # Select HLL Lifecare Limited from the top 'Select User' dropdown (with retries)
+        # Select HLL Lifecare Limited from the top 'Select User' dropdown (visible elements only)
         selected = False
         for attempt in range(1, 4):
             body_now = page.locator("body").inner_text()
@@ -249,25 +271,36 @@ def login_and_load_facility(page):
                 break
 
             print(f"Selecting facility (attempt {attempt}/3)...")
-            select_user_btn = page.locator("text=Select User").first
-            select_user_btn.wait_for(state="visible", timeout=10000)
-            select_user_btn.click()
+            opened = (
+                click_first_visible(page, "text=Select User", "Select User dropdown")
+                or click_first_visible(page, "text=Click to view list", "Click to view list")
+            )
+            if not opened:
+                print("Visible 'Select User' button not found yet, waiting...")
+                page.wait_for_timeout(2000)
+                continue
+
             page.wait_for_timeout(1500)
 
-            # Use the dropdown's Search box if present to isolate HLL Lifecare Limited
-            search_box = page.locator("input[placeholder*='Search' i]:visible").first
-            if search_box.count() > 0:
-                search_box.fill("HLL")
-                page.wait_for_timeout(1000)
+            # Confirm the dropdown list opened (Search box or Top Level Users visible)
+            search_loc = page.locator("input[placeholder*='Search' i]")
+            for i in range(search_loc.count()):
+                sb = search_loc.nth(i)
+                if sb.is_visible():
+                    sb.fill("HLL")
+                    page.wait_for_timeout(1000)
+                    break
 
-            # Click the matching facility entry in the dropdown
-            facility_opt = page.locator("text=HLL Lifecare Limited").last
-            if facility_opt.count() > 0 and facility_opt.is_visible():
-                facility_opt.click()
-            else:
-                page.locator("text=HLL").last.click()
+            # Click the visible dropdown entry (located below the top header bar, y >= 60)
+            clicked_item = (
+                click_first_visible(page, "text=HLL Lifecare Limited", "facility option", min_y=60)
+                or click_first_visible(page, "text=HLL Lifecare Limited", "facility option (any y)", min_y=0)
+            )
+            if not clicked_item:
+                print("Dropdown option not visible yet, retrying...")
+                page.wait_for_timeout(2000)
+                continue
 
-            # Wait up to 8s for 'No User Selected' to disappear
             try:
                 page.locator("text=No User Selected").first.wait_for(state="hidden", timeout=8000)
                 selected = True
@@ -282,13 +315,12 @@ def login_and_load_facility(page):
             print(f"Could not clear 'No User Selected'. URL={page.url} | Page preview: {preview}")
             return False
 
-        # Wait for Effluent Dashboard / Status to appear
+        # Wait for Effluent Dashboard / LAST SYNC to render
         try:
             page.locator("text=EFFLUENT DASHBOARD").first.wait_for(state="visible", timeout=15000)
         except Exception:
             pass
 
-        # Give the Real-Time Data card / WebSocket up to 15s to populate FINAL OUTLET / LAST SYNC
         try:
             page.locator("text=LAST SYNC").first.wait_for(state="visible", timeout=15000)
             page.wait_for_timeout(2000)
@@ -365,7 +397,7 @@ def check_kspcb_portal():
             print(f"KSPCB Last Sync: {latest_ts_formatted} ({delay_mins:.1f} mins old)")
 
         # 2. Check ONLINE / OFFLINE Status Badge
-        status_match = re.search(r"Status\s*:\s*(ONLINE|OFFLINE)", body_text, re.IGNORECASE)
+        status_match = re.search(r"Status\s*:\s*[^A-Za-z]*(ONLINE|OFFLINE)", body_text, re.IGNORECASE)
         portal_status = status_match.group(1).upper() if status_match else "UNKNOWN"
         print(f"KSPCB Portal Status: {portal_status}")
 
