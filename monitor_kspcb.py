@@ -282,7 +282,6 @@ def login_and_load_facility(page):
 
             page.wait_for_timeout(1500)
 
-            # Confirm the dropdown list opened (Search box or Top Level Users visible)
             search_loc = page.locator("input[placeholder*='Search' i]")
             for i in range(search_loc.count()):
                 sb = search_loc.nth(i)
@@ -291,7 +290,6 @@ def login_and_load_facility(page):
                     page.wait_for_timeout(1000)
                     break
 
-            # Click the visible dropdown entry (located below the top header bar, y >= 60)
             clicked_item = (
                 click_first_visible(page, "text=HLL Lifecare Limited", "facility option", min_y=60)
                 or click_first_visible(page, "text=HLL Lifecare Limited", "facility option (any y)", min_y=0)
@@ -315,17 +313,17 @@ def login_and_load_facility(page):
             print(f"Could not clear 'No User Selected'. URL={page.url} | Page preview: {preview}")
             return False
 
-        # Wait for Effluent Dashboard / LAST SYNC to render
+        # Wait for Effluent Dashboard & timestamp to render
         try:
             page.locator("text=EFFLUENT DASHBOARD").first.wait_for(state="visible", timeout=15000)
         except Exception:
             pass
 
         try:
-            page.locator("text=LAST SYNC").first.wait_for(state="visible", timeout=15000)
+            page.locator("text=/SOURCE UPDATE|LAST SYNC|Last updated:/i").first.wait_for(state="visible", timeout=15000)
             page.wait_for_timeout(2000)
         except Exception:
-            print("Note: 'LAST SYNC' did not appear within 15s (portal may be offline or delayed). Proceeding to read status...")
+            print("Note: Update timestamp did not appear within 15s (portal may be offline or delayed). Proceeding to read status...")
             page.wait_for_timeout(3000)
 
         return True
@@ -335,7 +333,7 @@ def login_and_load_facility(page):
 
 
 def parse_last_sync(body_text):
-    # Matches format: "27 Nov 2026, 06:45:44 pm"
+    # Matches format: "27 Nov 2026, 07:11:15 pm"
     m1 = re.search(
         r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{4},\s*\d{1,2}:\d{2}:\d{2}\s*[APap][Mm])",
         body_text
@@ -344,7 +342,7 @@ def parse_last_sync(body_text):
         raw = re.sub(r"\s+", " ", m1.group(1).strip()).upper()
         return datetime.strptime(raw, "%d %b %Y, %I:%M:%S %p").replace(tzinfo=IST)
 
-    # Matches format without seconds: "27 Nov 2026, 06:45 pm"
+    # Matches format without seconds: "27 Nov 2026, 07:11 pm"
     m2 = re.search(
         r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{4},\s*\d{1,2}:\d{2}\s*[APap][Mm])",
         body_text
@@ -353,7 +351,7 @@ def parse_last_sync(body_text):
         raw = re.sub(r"\s+", " ", m2.group(1).strip()).upper()
         return datetime.strptime(raw, "%d %b %Y, %I:%M %p").replace(tzinfo=IST)
 
-    # Fallback: "2026-11-27 18:45:44"
+    # Fallback: "2026-11-27 19:11:15"
     m3 = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
     if m3:
         return datetime.strptime(m3.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
@@ -371,6 +369,8 @@ def check_kspcb_portal():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
+            timezone_id="Asia/Kolkata",
+            locale="en-IN",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -387,14 +387,14 @@ def check_kspcb_portal():
         body_text = page.locator("body").inner_text()
         print("\n--- KSPCB EMS Dashboard Loaded Successfully ---")
 
-        # 1. Parse LAST SYNC Timestamp
+        # 1. Parse Last Updated / Source Update Timestamp (in IST)
         last_sync_dt = parse_last_sync(body_text)
         latest_ts_formatted = None
         delay_mins = None
         if last_sync_dt:
             latest_ts_formatted = last_sync_dt.strftime("%d-%b-%Y %I:%M:%S %p IST")
             delay_mins = (datetime.now(IST) - last_sync_dt).total_seconds() / 60
-            print(f"KSPCB Last Sync: {latest_ts_formatted} ({delay_mins:.1f} mins old)")
+            print(f"KSPCB Last Updated: {latest_ts_formatted} ({delay_mins:.1f} mins old)")
 
         # 2. Check ONLINE / OFFLINE Status Badge
         status_match = re.search(r"Status\s*:\s*[^A-Za-z]*(ONLINE|OFFLINE)", body_text, re.IGNORECASE)
@@ -421,13 +421,13 @@ def check_kspcb_portal():
                 )
         else:
             data_stale = True
-            system_alerts.append("Could not find a valid LAST SYNC timestamp on KSPCB EMS.")
+            system_alerts.append("Could not find a valid update timestamp on KSPCB EMS.")
             preview = re.sub(r"\s+", " ", body_text)[:300]
             print(f"Debug dashboard text preview: {preview}")
 
-        # 4. Check Parameter Limits inside FINAL OUTLET card
+        # 4. Check Parameter Limits inside FINAL_OUTLET card
         outlet_section = body_text
-        split_outlet = re.split(r"FINAL OUTLET", body_text, maxsplit=1, flags=re.IGNORECASE)
+        split_outlet = re.split(r"FINAL[\s_]+OUTLET", body_text, maxsplit=1, flags=re.IGNORECASE)
         if len(split_outlet) > 1:
             outlet_section = split_outlet[1]
             outlet_section = re.split(r"Stack:", outlet_section, maxsplit=1, flags=re.IGNORECASE)[0]
@@ -446,7 +446,7 @@ def check_kspcb_portal():
                         f"<b>{param}</b> EXCEEDED limit on KSPCB EMS: {val} <i>(Max allowed: {bounds['max']})</i>"
                     )
             else:
-                print(f"Warning: Could not parse KSPCB {param} from FINAL OUTLET.")
+                print(f"Warning: Could not parse KSPCB {param} from FINAL_OUTLET.")
 
         browser.close()
 
