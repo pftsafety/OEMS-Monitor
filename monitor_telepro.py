@@ -1,9 +1,11 @@
+import html
 import io
+import json
 import os
 import re
 import smtplib
 import traceback
-import urllib.parse
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -30,8 +32,8 @@ SENDER_EMAIL = os.environ.get("ALERT_EMAIL", "").strip()
 SENDER_APP_PASSWORD = os.environ.get("ALERT_EMAIL_PASS", "").strip()
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "").strip()
 
-WHATSAPP_PHONE = os.environ.get("WHATSAPP_PHONE", "").strip()
-WHATSAPP_APIKEY = os.environ.get("WHATSAPP_APIKEY", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 # --- EFFLUENT THRESHOLD LIMITS ---
 LIMITS = {
@@ -53,8 +55,8 @@ def check_secrets_status():
     print(f"ALERT_EMAIL set: {'YES' if SENDER_EMAIL else 'NO (Missing!)'}")
     print(f"ALERT_EMAIL_PASS set: {'YES' if SENDER_APP_PASSWORD else 'NO (Missing!)'}")
     print(f"RECEIVER_EMAIL set: {'YES' if RECEIVER_EMAIL else 'NO (Missing!)'}")
-    print(f"WHATSAPP_PHONE set: {'YES' if WHATSAPP_PHONE else 'NO (Optional)'}")
-    print(f"WHATSAPP_APIKEY set: {'YES' if WHATSAPP_APIKEY else 'NO (Optional)'}")
+    print(f"TELEGRAM_BOT_TOKEN set: {'YES' if TELEGRAM_BOT_TOKEN else 'NO (Optional)'}")
+    print(f"TELEGRAM_CHAT_ID set: {'YES' if TELEGRAM_CHAT_ID else 'NO (Optional)'}")
     print("----------------------------------")
 
 
@@ -85,132 +87,140 @@ def send_html_alert(subject, html_body, plain_text_fallback):
         print(f"Failed to send email alert: {e}")
 
 
-def send_whatsapp_alert(subject, limit_alerts, system_alerts, checked_at):
-    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
-        print("WhatsApp secrets not set. Skipping WhatsApp alert.")
+def send_telegram_alert(subject, limit_alerts, system_alerts, checked_at):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram secrets not set. Skipping Telegram alert.")
         return
 
-    phones = [p.strip().replace(" ", "").replace("-", "") for p in WHATSAPP_PHONE.split(",") if p.strip()]
-    apikeys = [k.strip() for k in WHATSAPP_APIKEY.split(",") if k.strip()]
+    chat_ids = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
 
     lines = [
-        "⚠️ *HLL TelePro ETP Alert*",
-        f"*{subject}*",
-        "Site: OD23KL03233_Effluent_HLLONLINE",
+        "⚠️ <b>HLL TelePro ETP Alert</b>",
+        f"<b>{html.escape(subject)}</b>",
+        "Site: <code>OD23KL03233_Effluent_HLLONLINE</code>",
         ""
     ]
 
     if limit_alerts:
-        lines.append("📊 *Limit Violations:*")
+        lines.append("📊 <b>Limit Violations:</b>")
         for a in limit_alerts:
-            lines.append(f"• {strip_html(a)}")
+            lines.append(f"• {a}")
         lines.append("")
 
     if system_alerts:
-        lines.append("📡 *Transmission & System:*")
+        lines.append("📡 <b>Transmission &amp; System:</b>")
         for a in system_alerts:
-            lines.append(f"• {strip_html(a)}")
+            lines.append(f"• {a}")
         lines.append("")
 
-    lines.append(f"🕒 {checked_at}")
-    lines.append(f"🔗 {DASHBOARD_URL}")
+    lines.append(f"🕒 {html.escape(checked_at)}")
+    lines.append(f'🔗 <a href="{DASHBOARD_URL}">View Live TelePro Dashboard</a>')
 
-    encoded_msg = urllib.parse.quote("\n".join(lines))
+    message_text = "\n".join(lines)
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    for idx, (phone, apikey) in enumerate(zip(phones, apikeys), start=1):
-        encoded_phone = urllib.parse.quote(phone)
-        encoded_key = urllib.parse.quote(apikey)
-        url = (
-            f"https://api.callmebot.com/whatsapp.php?"
-            f"phone={encoded_phone}&text={encoded_msg}&apikey={encoded_key}"
+    for idx, chat_id in enumerate(chat_ids, start=1):
+        payload = json.dumps({
+            "chat_id": chat_id,
+            "text": message_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
         )
         try:
-            with urllib.request.urlopen(url, timeout=15) as resp:
-                print(f"WhatsApp alert #{idx} sent successfully (HTTP {resp.status}).")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                print(f"Telegram alert #{idx} sent successfully (HTTP {resp.status}).")
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            print(f"Failed to send Telegram alert #{idx} (HTTP {e.code}): {err_body}")
         except Exception as e:
-            print(f"Failed to send WhatsApp alert #{idx}: {e}")
+            print(f"Failed to send Telegram alert #{idx}: {e}")
 
 
 def check_board_status(page, label):
-    """Accurately detects green checkmark vs red X for CPCB: or KSPCB:."""
+    """Isolates the exact CPCB: or KSPCB: text line and inspects only its adjacent icon."""
     other_label = "KSPCB:" if label == "CPCB:" else "CPCB:"
-    tag_id = label.replace(":", "").lower()
 
-    js_result = page.evaluate("""({ label, otherLabel, tagId }) => {
-        const all = Array.from(document.querySelectorAll('*'));
-        let target = null;
-        for (const el of all) {
-            const txt = (el.innerText || '').trim();
-            if (txt.includes(label) && !txt.includes(otherLabel) && txt.length < 40) {
-                if (!target || el.innerHTML.length < target.innerHTML.length) {
-                    target = el;
-                }
+    box_info = page.evaluate("""({ label, otherLabel }) => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+            const raw = (node.nodeValue || '').trim();
+            if (!raw) continue;
+            const norm = raw.replace(/\\s+/g, '').toUpperCase();
+            if (!norm.includes(label.toUpperCase()) || norm.includes(otherLabel.toUpperCase())) {
+                continue;
             }
-        }
-        if (!target) return { status: 'missing', info: 'Label not found' };
+            const parent = node.parentElement;
+            if (!parent) continue;
+            parent.scrollIntoView({ block: 'center' });
 
-        let container = target;
-        if (!target.querySelector('i, svg, img')) {
-            const next = target.nextElementSibling;
-            if (next && (['I', 'SVG', 'IMG'].includes(next.tagName) || next.querySelector('i, svg, img'))) {
-                container = next;
-            } else if (target.parentElement && !(target.parentElement.innerText || '').includes(otherLabel)) {
-                container = target.parentElement;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            const rect = range.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+
+            if (/[❌✖✗✘]/.test(raw)) {
+                return { status: 'fail', info: `Text emoji fail (${raw})` };
             }
+            if (/[✅✔✓]/.test(raw)) {
+                return { status: 'pass', info: `Text emoji pass (${raw})` };
+            }
+
+            const iconEl = document.elementFromPoint(rect.right + 12, rect.top + rect.height / 2);
+            const iconCls = iconEl
+                ? (typeof iconEl.className === 'string' ? iconEl.className : (iconEl.className?.baseVal || ''))
+                : '';
+
+            return {
+                status: 'clip',
+                x: Math.max(0, rect.left),
+                y: Math.max(0, rect.top - 4),
+                width: rect.width + 45,
+                height: Math.max(24, rect.height + 8),
+                info: `iconTag=${iconEl ? iconEl.tagName : 'none'} cls='${iconCls}'`
+            };
         }
+        return { status: 'missing', info: 'Visible label not found' };
+    }""", {"label": label, "otherLabel": other_label})
 
-        container.setAttribute('data-board-check', tagId);
+    if box_info["status"] == "fail":
+        return False, box_info["info"]
+    if box_info["status"] == "pass":
+        return True, box_info["info"]
+    if box_info["status"] != "clip":
+        return False, box_info["info"]
 
-        const icon = container.querySelector('i, svg, img') || container;
-        const cls = (typeof icon.className === 'string' ? icon.className : (icon.className?.baseVal || '')).toLowerCase();
-        const src = (icon.getAttribute('src') || '').toLowerCase();
-        const alt = (icon.getAttribute('alt') || icon.getAttribute('title') || '').toLowerCase();
-        const text = (container.innerText || '');
-        const outer = (icon.outerHTML || '').toLowerCase();
-
-        const combined = `${cls} ${src} ${alt} ${outer}`;
-        const failWords = [
-            'fa-times', 'fa-close', 'fa-window-close', 'fa-xmark', 'fa-square-xmark',
-            'fa-ban', 'text-danger', 'bg-danger', 'cross', 'fail', 'error', 'offline'
-        ];
-        const passWords = [
-            'fa-check', 'fa-circle-check', 'text-success', 'bg-success', 'tick'
-        ];
-
-        if (/[❌✖✗✘]/.test(text) || failWords.some(w => combined.includes(w))) {
-            return { status: 'fail', info: `DOM fail (${cls || src || text.trim()})` };
-        }
-        if (/[✅✔✓]/.test(text) || passWords.some(w => combined.includes(w))) {
-            return { status: 'pass', info: `DOM pass (${cls || src || text.trim()})` };
-        }
-        return { status: 'unknown', info: `cls='${cls}' src='${src}'` };
-    }""", {"label": label, "otherLabel": other_label, "tagId": tag_id})
-
-    if js_result["status"] == "fail":
-        return False, js_result["info"]
-    if js_result["status"] == "pass":
-        return True, js_result["info"]
-
-    # Pixel-color fallback (detects red X vs green checkmark for any SVG/PNG/emoji)
     try:
-        loc = page.locator(f"[data-board-check='{tag_id}']").first
-        png_bytes = loc.screenshot(timeout=5000)
+        png_bytes = page.screenshot(clip={
+            "x": box_info["x"],
+            "y": box_info["y"],
+            "width": box_info["width"],
+            "height": box_info["height"]
+        })
         img = PIL.Image.open(io.BytesIO(png_bytes)).convert("RGB")
         red_px = 0
         green_px = 0
         for r, g, b in img.getdata():
-            if r > 150 and r > g * 1.4 and r > b * 1.4:
+            if r > 140 and r > g * 1.4 and r > b * 1.4:
                 red_px += 1
             elif g > 110 and g > r * 1.25:
                 green_px += 1
-        info = f"Pixel check (red={red_px}, green={green_px}) | {js_result['info']}"
-        if red_px > green_px and red_px > 10:
+
+        info = f"Icon crop (red={red_px}, green={green_px}) | {box_info['info']}"
+        if red_px > green_px and red_px > 15:
             return False, info
-        if green_px > red_px and green_px > 10:
+        if green_px > red_px and green_px > 15:
             return True, info
-        return False, f"No green checkmark found | {info}"
+        return False, f"No green checkmark detected | {info}"
     except Exception as e:
-        return False, f"Fallback error: {e} | {js_result['info']}"
+        return False, f"Crop error: {e} | {box_info['info']}"
 
 
 def save_session_cookie(context):
@@ -380,7 +390,7 @@ def check_dashboard():
         if "IoT: Online" not in body_text:
             system_alerts.append("IoT Device Status is <b>OFFLINE</b>")
 
-        # 3. Check CPCB/KSPCB Transmission (DOM + Pixel Color Verification)
+        # 3. Check CPCB/KSPCB Transmission (Exact Line Crop Check)
         cpcb_ok, cpcb_info = check_board_status(page, "CPCB:")
         kspcb_ok, kspcb_info = check_board_status(page, "KSPCB:")
         print(f"CPCB Status: {'OK' if cpcb_ok else 'FAILED'} | {cpcb_info}")
@@ -457,9 +467,9 @@ def check_dashboard():
     for a in limit_alerts + system_alerts:
         plain_text += f"- {strip_html(a)}\n"
 
-    # Dispatch Both HTML Email & WhatsApp Alert
+    # Dispatch Both HTML Email & Telegram Alert
     send_html_alert(final_subject, html_content, plain_text)
-    send_whatsapp_alert(final_subject, limit_alerts, system_alerts, checked_at)
+    send_telegram_alert(final_subject, limit_alerts, system_alerts, checked_at)
 
 
 if __name__ == "__main__":
