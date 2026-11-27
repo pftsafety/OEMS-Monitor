@@ -3,6 +3,8 @@ import os
 import re
 import smtplib
 import traceback
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import PIL.Image
@@ -28,6 +30,9 @@ SENDER_EMAIL = os.environ.get("ALERT_EMAIL", "").strip()
 SENDER_APP_PASSWORD = os.environ.get("ALERT_EMAIL_PASS", "").strip()
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "").strip()
 
+WHATSAPP_PHONE = os.environ.get("WHATSAPP_PHONE", "").strip()
+WHATSAPP_APIKEY = os.environ.get("WHATSAPP_APIKEY", "").strip()
+
 # --- EFFLUENT THRESHOLD LIMITS ---
 LIMITS = {
     "BOD": {"max": 30.0},
@@ -48,7 +53,13 @@ def check_secrets_status():
     print(f"ALERT_EMAIL set: {'YES' if SENDER_EMAIL else 'NO (Missing!)'}")
     print(f"ALERT_EMAIL_PASS set: {'YES' if SENDER_APP_PASSWORD else 'NO (Missing!)'}")
     print(f"RECEIVER_EMAIL set: {'YES' if RECEIVER_EMAIL else 'NO (Missing!)'}")
+    print(f"WHATSAPP_PHONE set: {'YES' if WHATSAPP_PHONE else 'NO (Optional)'}")
+    print(f"WHATSAPP_APIKEY set: {'YES' if WHATSAPP_APIKEY else 'NO (Optional)'}")
     print("----------------------------------")
+
+
+def strip_html(text):
+    return re.sub(r"<[^<]+?>", "", text)
 
 
 def send_html_alert(subject, html_body, plain_text_fallback):
@@ -74,6 +85,134 @@ def send_html_alert(subject, html_body, plain_text_fallback):
         print(f"Failed to send email alert: {e}")
 
 
+def send_whatsapp_alert(subject, limit_alerts, system_alerts, checked_at):
+    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
+        print("WhatsApp secrets not set. Skipping WhatsApp alert.")
+        return
+
+    phones = [p.strip().replace(" ", "").replace("-", "") for p in WHATSAPP_PHONE.split(",") if p.strip()]
+    apikeys = [k.strip() for k in WHATSAPP_APIKEY.split(",") if k.strip()]
+
+    lines = [
+        "⚠️ *HLL TelePro ETP Alert*",
+        f"*{subject}*",
+        "Site: OD23KL03233_Effluent_HLLONLINE",
+        ""
+    ]
+
+    if limit_alerts:
+        lines.append("📊 *Limit Violations:*")
+        for a in limit_alerts:
+            lines.append(f"• {strip_html(a)}")
+        lines.append("")
+
+    if system_alerts:
+        lines.append("📡 *Transmission & System:*")
+        for a in system_alerts:
+            lines.append(f"• {strip_html(a)}")
+        lines.append("")
+
+    lines.append(f"🕒 {checked_at}")
+    lines.append(f"🔗 {DASHBOARD_URL}")
+
+    encoded_msg = urllib.parse.quote("\n".join(lines))
+
+    for idx, (phone, apikey) in enumerate(zip(phones, apikeys), start=1):
+        encoded_phone = urllib.parse.quote(phone)
+        encoded_key = urllib.parse.quote(apikey)
+        url = (
+            f"https://api.callmebot.com/whatsapp.php?"
+            f"phone={encoded_phone}&text={encoded_msg}&apikey={encoded_key}"
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                print(f"WhatsApp alert #{idx} sent successfully (HTTP {resp.status}).")
+        except Exception as e:
+            print(f"Failed to send WhatsApp alert #{idx}: {e}")
+
+
+def check_board_status(page, label):
+    """Accurately detects green checkmark vs red X for CPCB: or KSPCB:."""
+    other_label = "KSPCB:" if label == "CPCB:" else "CPCB:"
+    tag_id = label.replace(":", "").lower()
+
+    js_result = page.evaluate("""({ label, otherLabel, tagId }) => {
+        const all = Array.from(document.querySelectorAll('*'));
+        let target = null;
+        for (const el of all) {
+            const txt = (el.innerText || '').trim();
+            if (txt.includes(label) && !txt.includes(otherLabel) && txt.length < 40) {
+                if (!target || el.innerHTML.length < target.innerHTML.length) {
+                    target = el;
+                }
+            }
+        }
+        if (!target) return { status: 'missing', info: 'Label not found' };
+
+        let container = target;
+        if (!target.querySelector('i, svg, img')) {
+            const next = target.nextElementSibling;
+            if (next && (['I', 'SVG', 'IMG'].includes(next.tagName) || next.querySelector('i, svg, img'))) {
+                container = next;
+            } else if (target.parentElement && !(target.parentElement.innerText || '').includes(otherLabel)) {
+                container = target.parentElement;
+            }
+        }
+
+        container.setAttribute('data-board-check', tagId);
+
+        const icon = container.querySelector('i, svg, img') || container;
+        const cls = (typeof icon.className === 'string' ? icon.className : (icon.className?.baseVal || '')).toLowerCase();
+        const src = (icon.getAttribute('src') || '').toLowerCase();
+        const alt = (icon.getAttribute('alt') || icon.getAttribute('title') || '').toLowerCase();
+        const text = (container.innerText || '');
+        const outer = (icon.outerHTML || '').toLowerCase();
+
+        const combined = `${cls} ${src} ${alt} ${outer}`;
+        const failWords = [
+            'fa-times', 'fa-close', 'fa-window-close', 'fa-xmark', 'fa-square-xmark',
+            'fa-ban', 'text-danger', 'bg-danger', 'cross', 'fail', 'error', 'offline'
+        ];
+        const passWords = [
+            'fa-check', 'fa-circle-check', 'text-success', 'bg-success', 'tick'
+        ];
+
+        if (/[❌✖✗✘]/.test(text) || failWords.some(w => combined.includes(w))) {
+            return { status: 'fail', info: `DOM fail (${cls || src || text.trim()})` };
+        }
+        if (/[✅✔✓]/.test(text) || passWords.some(w => combined.includes(w))) {
+            return { status: 'pass', info: `DOM pass (${cls || src || text.trim()})` };
+        }
+        return { status: 'unknown', info: `cls='${cls}' src='${src}'` };
+    }""", {"label": label, "otherLabel": other_label, "tagId": tag_id})
+
+    if js_result["status"] == "fail":
+        return False, js_result["info"]
+    if js_result["status"] == "pass":
+        return True, js_result["info"]
+
+    # Pixel-color fallback (detects red X vs green checkmark for any SVG/PNG/emoji)
+    try:
+        loc = page.locator(f"[data-board-check='{tag_id}']").first
+        png_bytes = loc.screenshot(timeout=5000)
+        img = PIL.Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        red_px = 0
+        green_px = 0
+        for r, g, b in img.getdata():
+            if r > 150 and r > g * 1.4 and r > b * 1.4:
+                red_px += 1
+            elif g > 110 and g > r * 1.25:
+                green_px += 1
+        info = f"Pixel check (red={red_px}, green={green_px}) | {js_result['info']}"
+        if red_px > green_px and red_px > 10:
+            return False, info
+        if green_px > red_px and green_px > 10:
+            return True, info
+        return False, f"No green checkmark found | {info}"
+    except Exception as e:
+        return False, f"Fallback error: {e} | {js_result['info']}"
+
+
 def save_session_cookie(context):
     for c in context.cookies():
         if c.get("name") == "sessionid" and c.get("value"):
@@ -84,7 +223,6 @@ def save_session_cookie(context):
 
 
 def read_captcha_best(img_bytes, ocr_beta, ocr_std):
-    # Upscale 2x and convert to grayscale for cleaner OCR
     img = PIL.Image.open(io.BytesIO(img_bytes)).convert("L")
     img = img.resize((img.width * 2, img.height * 2), PIL.Image.LANCZOS)
     buf = io.BytesIO()
@@ -101,7 +239,6 @@ def read_captcha_best(img_bytes, ocr_beta, ocr_std):
         except Exception:
             pass
 
-    # Prefer a 6-letter read (standard TelePro Captcha format)
     for c in candidates:
         if len(c) == 6:
             return c
@@ -182,7 +319,6 @@ def try_cookie(context, page, raw_cookie, source_label):
 
 
 def authenticate(context, page):
-    # 1. Try auto-saved cached session cookie first
     if os.path.exists(SESSION_FILE):
         try:
             with open(SESSION_FILE, "r") as f:
@@ -192,7 +328,6 @@ def authenticate(context, page):
         except Exception as e:
             print(f"Cached cookie check failed: {e}")
 
-    # 2. Try GitHub Secret TELEPRO_COOKIE next
     if SESSION_COOKIE:
         try:
             if try_cookie(context, page, SESSION_COOKIE, "GitHub Secret"):
@@ -200,12 +335,10 @@ def authenticate(context, page):
         except Exception as e:
             print(f"Secret cookie check failed: {e}")
 
-    # 3. Fallback to upgraded Captcha solver (auto-saves new cookie on success)
     print("Falling back to upgraded Captcha login...")
     if solve_captcha_and_login(context, page):
         return True
 
-    # Remove stale file if login failed so we don't re-cache a dead cookie
     if os.path.exists(SESSION_FILE):
         os.remove(SESSION_FILE)
     return False
@@ -223,7 +356,7 @@ def check_dashboard():
 
         if not authenticate(context, page):
             browser.close()
-            print("Login failed. Exiting without sending an alert email.")
+            print("Login failed. Exiting without sending an alert.")
             return
 
         page.wait_for_timeout(4000)
@@ -247,14 +380,16 @@ def check_dashboard():
         if "IoT: Online" not in body_text:
             system_alerts.append("IoT Device Status is <b>OFFLINE</b>")
 
-        # 3. Check CPCB/KSPCB Transmission
-        cpcb_ok = page.locator("text=CPCB: >> .. >> .fa-check, .fa-check-circle, .text-success, svg, img, i").count() > 0
-        kspcb_ok = page.locator("text=KSPCB: >> .. >> .fa-check, .fa-check-circle, .text-success, svg, img, i").count() > 0
+        # 3. Check CPCB/KSPCB Transmission (DOM + Pixel Color Verification)
+        cpcb_ok, cpcb_info = check_board_status(page, "CPCB:")
+        kspcb_ok, kspcb_info = check_board_status(page, "KSPCB:")
+        print(f"CPCB Status: {'OK' if cpcb_ok else 'FAILED'} | {cpcb_info}")
+        print(f"KSPCB Status: {'OK' if kspcb_ok else 'FAILED'} | {kspcb_info}")
 
         if not cpcb_ok:
-            system_alerts.append("Data NOT sending to <b>CPCB</b> (Checkmark missing)")
+            system_alerts.append("Data NOT sending to <b>CPCB</b> (Red X / Transmission Failed)")
         if not kspcb_ok:
-            system_alerts.append("Data NOT sending to <b>KSPCB</b> (Checkmark missing)")
+            system_alerts.append("Data NOT sending to <b>KSPCB</b> (Red X / Transmission Failed)")
 
         # 4. Check Data Freshness
         ts_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
@@ -284,6 +419,8 @@ def check_dashboard():
         print("\nAll parameters normal and transmitting on schedule.")
         return
 
+    checked_at = datetime.now(IST).strftime("%Y-%m-%d %I:%M:%S %p IST")
+
     # Build the HTML Email Body
     html_content = f"""
     <html>
@@ -308,7 +445,7 @@ def check_dashboard():
     html_content += f"""
             <hr style="border: 0; border-top: 1px solid #eee; margin: 25px 0;">
             <p style="font-size: 13px; color: #777; margin-bottom: 20px;">
-                <b>Checked at:</b> {datetime.now(IST).strftime('%Y-%m-%d %I:%M:%S %p IST')}
+                <b>Checked at:</b> {checked_at}
             </p>
             <a href="{DASHBOARD_URL}" style="display: inline-block; background-color: #0275d8; color: white; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold;">View Live TelePro Dashboard</a>
         </div>
@@ -318,9 +455,11 @@ def check_dashboard():
 
     plain_text = "ETP Alerts Detected:\n\n"
     for a in limit_alerts + system_alerts:
-        plain_text += f"- {re.sub('<[^<]+>', '', a)}\n"
+        plain_text += f"- {strip_html(a)}\n"
 
+    # Dispatch Both HTML Email & WhatsApp Alert
     send_html_alert(final_subject, html_content, plain_text)
+    send_whatsapp_alert(final_subject, limit_alerts, system_alerts, checked_at)
 
 
 if __name__ == "__main__":
