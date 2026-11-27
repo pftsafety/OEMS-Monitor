@@ -39,7 +39,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 LIMITS = {
     "BOD": {"max": 30.0},
     "COD": {"max": 250.0},
-    "pH":  {"min": 6.5, "max": 6.6},
+    "pH":  {"min": 6.5, "max": 8.5},
     "TSS": {"max": 200.0}
 }
 
