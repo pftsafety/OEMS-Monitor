@@ -44,7 +44,7 @@ LIMITS = {
     "TSS": {"max": 200.0}
 }
 
-MAX_DATA_DELAY_MINUTES = 18
+MAX_DATA_DELAY_MINUTES = 12
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
