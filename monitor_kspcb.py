@@ -231,26 +231,71 @@ def login_and_load_facility(page):
         page.locator("button:has-text('Login'), button[type='submit']").first.click()
         print("Submitted KSPCB login form, waiting for dashboard...")
 
-        # Wait for redirect to /water and Welcome Back popup to clear
         page.wait_for_url("**/water**", timeout=25000)
-        page.wait_for_timeout(4000)
 
-        # Open 'Select User' dropdown in the top header
-        select_user_btn = page.locator("text=Select User").first
-        select_user_btn.wait_for(state="visible", timeout=15000)
-        select_user_btn.click()
-        page.wait_for_timeout(1500)
+        # Wait for the 'Welcome Back' popup to finish disappearing
+        try:
+            page.locator("text=Welcome Back").first.wait_for(state="hidden", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(2000)
 
-        # Select HLL Lifecare Limited, Thiruvananthapuram
-        facility_opt = page.locator(f"text={FACILITY_NAME}").first
-        if facility_opt.count() == 0:
-            facility_opt = page.locator("text=HLL Lifecare Limited").first
-        facility_opt.wait_for(state="visible", timeout=10000)
-        facility_opt.click()
+        # Select HLL Lifecare Limited from the top 'Select User' dropdown (with retries)
+        selected = False
+        for attempt in range(1, 4):
+            body_now = page.locator("body").inner_text()
+            if "EFFLUENT DASHBOARD" in body_now.upper() or "NO USER SELECTED" not in body_now.upper():
+                selected = True
+                break
 
-        # Wait for FINAL OUTLET data card to render
-        page.locator("text=FINAL OUTLET").first.wait_for(state="visible", timeout=20000)
-        page.wait_for_timeout(3000)
+            print(f"Selecting facility (attempt {attempt}/3)...")
+            select_user_btn = page.locator("text=Select User").first
+            select_user_btn.wait_for(state="visible", timeout=10000)
+            select_user_btn.click()
+            page.wait_for_timeout(1500)
+
+            # Use the dropdown's Search box if present to isolate HLL Lifecare Limited
+            search_box = page.locator("input[placeholder*='Search' i]:visible").first
+            if search_box.count() > 0:
+                search_box.fill("HLL")
+                page.wait_for_timeout(1000)
+
+            # Click the matching facility entry in the dropdown
+            facility_opt = page.locator("text=HLL Lifecare Limited").last
+            if facility_opt.count() > 0 and facility_opt.is_visible():
+                facility_opt.click()
+            else:
+                page.locator("text=HLL").last.click()
+
+            # Wait up to 8s for 'No User Selected' to disappear
+            try:
+                page.locator("text=No User Selected").first.wait_for(state="hidden", timeout=8000)
+                selected = True
+                print("Facility selected successfully.")
+                break
+            except Exception:
+                print("Dropdown selection did not register yet, retrying...")
+                page.wait_for_timeout(1500)
+
+        if not selected:
+            preview = re.sub(r"\s+", " ", page.locator("body").inner_text())[:300]
+            print(f"Could not clear 'No User Selected'. URL={page.url} | Page preview: {preview}")
+            return False
+
+        # Wait for Effluent Dashboard / Status to appear
+        try:
+            page.locator("text=EFFLUENT DASHBOARD").first.wait_for(state="visible", timeout=15000)
+        except Exception:
+            pass
+
+        # Give the Real-Time Data card / WebSocket up to 15s to populate FINAL OUTLET / LAST SYNC
+        try:
+            page.locator("text=LAST SYNC").first.wait_for(state="visible", timeout=15000)
+            page.wait_for_timeout(2000)
+        except Exception:
+            print("Note: 'LAST SYNC' did not appear within 15s (portal may be offline or delayed). Proceeding to read status...")
+            page.wait_for_timeout(3000)
+
         return True
     except Exception as e:
         print(f"KSPCB login/navigation failed: {e}")
@@ -265,14 +310,21 @@ def parse_last_sync(body_text):
     )
     if m1:
         raw = re.sub(r"\s+", " ", m1.group(1).strip()).upper()
-        dt = datetime.strptime(raw, "%d %b %Y, %I:%M:%S %p").replace(tzinfo=IST)
-        return dt
+        return datetime.strptime(raw, "%d %b %Y, %I:%M:%S %p").replace(tzinfo=IST)
+
+    # Matches format without seconds: "27 Nov 2026, 06:45 pm"
+    m2 = re.search(
+        r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{4},\s*\d{1,2}:\d{2}\s*[APap][Mm])",
+        body_text
+    )
+    if m2:
+        raw = re.sub(r"\s+", " ", m2.group(1).strip()).upper()
+        return datetime.strptime(raw, "%d %b %Y, %I:%M %p").replace(tzinfo=IST)
 
     # Fallback: "2026-11-27 18:45:44"
-    m2 = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
-    if m2:
-        dt = datetime.strptime(m2.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
-        return dt
+    m3 = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})", body_text)
+    if m3:
+        return datetime.strptime(m3.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=IST)
 
     return None
 
@@ -285,7 +337,14 @@ def check_kspcb_portal():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport={"width": 1920, "height": 1080})
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
         page = context.new_page()
 
         if not login_and_load_facility(page):
@@ -331,16 +390,18 @@ def check_kspcb_portal():
         else:
             data_stale = True
             system_alerts.append("Could not find a valid LAST SYNC timestamp on KSPCB EMS.")
+            preview = re.sub(r"\s+", " ", body_text)[:300]
+            print(f"Debug dashboard text preview: {preview}")
 
         # 4. Check Parameter Limits inside FINAL OUTLET card
         outlet_section = body_text
-        if "FINAL OUTLET" in body_text:
-            outlet_section = body_text.split("FINAL OUTLET", 1)[1]
-            if "Stack:" in outlet_section:
-                outlet_section = outlet_section.split("Stack:", 1)[0]
+        split_outlet = re.split(r"FINAL OUTLET", body_text, maxsplit=1, flags=re.IGNORECASE)
+        if len(split_outlet) > 1:
+            outlet_section = split_outlet[1]
+            outlet_section = re.split(r"Stack:", outlet_section, maxsplit=1, flags=re.IGNORECASE)[0]
 
         for param, bounds in LIMITS.items():
-            match = re.search(rf"\b{param}\b(?:\s*\([^)]*\))?\s*\n+\s*([\d.]+)", outlet_section)
+            match = re.search(rf"\b{param}\b(?:\s*\([^)]*\))?\s+([\d.]+)", outlet_section)
             if match:
                 val = float(match.group(1))
                 print(f"KSPCB {param}: {val}")
